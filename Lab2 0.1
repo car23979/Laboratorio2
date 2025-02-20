@@ -1,0 +1,112 @@
+﻿.include "M328PDEF.inc"
+.cseg
+.org 0x0000
+
+; Registros
+.def CONTADOR_TIMER = R20    ; Contador binario (Timer0, PORTB)
+.def CONTADOR_BOTONES = R21  ; Contador hexadecimal (botones, PORTD)
+.def OVERFLOW_COUNT = R22    ; Contador de overflows Timer0
+.def TEMP = R16              ; Registro temporal
+
+; Tabla de segmentos (Ánodo común FJ5161BH)
+SEGMENT_TABLE:
+    .db 0xC0, 0xF9, 0xA4, 0xB0, 0x99, 0x92, 0x82, 0xF8  ; 0-7
+    .db 0x80, 0x90, 0x88, 0x83, 0xC6, 0xA1, 0x86, 0x8E  ; 8-F
+
+; Configuración inicial
+SETUP:
+    ; --- Stack ---
+    LDI TEMP, LOW(RAMEND)
+    OUT SPL, TEMP
+    LDI TEMP, HIGH(RAMEND)
+    OUT SPH, TEMP
+
+    ; --- Timer0 (100ms) ---
+    LDI TEMP, (1 << CS02) | (1 << CS00) ; Prescaler 1024 (16MHz → 64µs/tick)
+    OUT TCCR0B, TEMP
+    CLR TEMP
+    OUT TCNT0, TEMP        ; Iniciar Timer0 en 0
+
+    ; --- Puertos ---
+    LDI TEMP, 0x0F
+    OUT DDRB, TEMP          ; PB0-PB3: Salidas (contador binario)
+    LDI TEMP, 0b01111111
+    OUT DDRD, TEMP          ; PD0-PD6: Salidas (display 7 segmentos)
+    CBI DDRC, 0             ; PC0 (B1) y PC1 (B2) como entradas
+    CBI DDRC, 1
+    SBI PORTC, 0            ; Pull-up en PC0
+    SBI PORTC, 1            ; Pull-up en PC1
+
+    ; --- Variables ---
+    CLR CONTADOR_TIMER
+    CLR CONTADOR_BOTONES
+    CLR OVERFLOW_COUNT
+
+; Loop principal
+MAIN_LOOP:
+    ; ========== Contador binario automático (Timer0) ==========
+    IN TEMP, TIFR0
+    SBRS TEMP, TOV0         ; ¿Hubo overflow?
+    RJMP CHECK_BOTONES
+
+    SBI TIFR0, TOV0         ; Limpiar bandera
+    INC OVERFLOW_COUNT
+    CPI OVERFLOW_COUNT, 6   ; 6 overflows ≈ 98.3ms
+    BRNE CHECK_BOTONES
+
+    CLR OVERFLOW_COUNT
+    INC CONTADOR_TIMER      ; Incrementar contador binario
+    ANDI CONTADOR_TIMER, 0x0F
+    OUT PORTB, CONTADOR_TIMER ; Mostrar en PB0-PB3
+
+    ; ========== Contador hexadecimal con botones (PC0 y PC1) ==========
+CHECK_BOTONES:
+    ; --- Anti-rebote optimizado ---
+    CLR R17                 ; R17: Bit 0 (B1), Bit 1 (B2)
+    SBIC PINC, 0            ; B1 (PC0) presionado?
+    RJMP CHECK_B2
+    RCALL DELAY_10MS
+    SBIC PINC, 0            ; Verificar nuevamente
+    RJMP CHECK_B2
+    SBR R17, 1              ; B1 válido
+
+CHECK_B2:
+    SBIC PINC, 1            ; B2 (PC1) presionado?
+    RJMP ACTUALIZAR_CONTADOR
+    RCALL DELAY_10MS
+    SBIC PINC, 1
+    RJMP ACTUALIZAR_CONTADOR
+    SBR R17, 2              ; B2 válido
+
+    ; --- Manejar incremento/decremento ---
+ACTUALIZAR_CONTADOR:
+    SBRS R17, 0             ; Si B1 presionado
+    RJMP NO_INCREMENTO
+    INC CONTADOR_BOTONES    ; Incrementar contador hexadecimal
+NO_INCREMENTO:
+    SBRS R17, 1             ; Si B2 presionado
+    RJMP NO_DECREMENTO
+    DEC CONTADOR_BOTONES    ; Decrementar contador hexadecimal
+NO_DECREMENTO:
+    ANDI CONTADOR_BOTONES, 0x0F ; Limitar a 4 bits
+
+    ; --- Actualizar display 7 segmentos ---
+    LDI ZL, LOW(SEGMENT_TABLE << 1)
+    LDI ZH, HIGH(SEGMENT_TABLE << 1)
+    ADD ZL, CONTADOR_BOTONES ; Calcular posición en tabla
+    LPM TEMP, Z              ; Cargar patrón
+    OUT PORTD, TEMP          ; Mostrar en PD0-PD6
+
+    RJMP MAIN_LOOP
+
+; --- Retardo de 10ms (anti-rebote) ---
+DELAY_10MS:
+    LDI TEMP, 100            ; 100 iteraciones × 100µs = 10ms
+DELAY_LOOP:
+    LDI R24, 200            ; 200 ciclos ≈ 100µs (1MHz)
+DELAY_INNER:
+    DEC R24
+    BRNE DELAY_INNER
+    DEC TEMP
+    BRNE DELAY_LOOP
+    RET
